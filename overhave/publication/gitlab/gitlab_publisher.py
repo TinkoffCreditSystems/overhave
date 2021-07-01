@@ -1,6 +1,9 @@
 import logging
+from http import HTTPStatus
+from typing import cast
 
-from requests import HTTPError
+from gitlab import GitlabCreateError, GitlabHttpError
+from gitlab.v4.objects.merge_requests import ProjectMergeRequest
 
 from overhave.entities import OverhaveFileSettings, PublisherContext
 from overhave.publication.git_publisher import GitVersionPublisher
@@ -8,7 +11,7 @@ from overhave.publication.gitlab.settings import OverhaveGitlabPublisherSettings
 from overhave.scenario import FileManager
 from overhave.storage import IDraftStorage, IFeatureStorage, IScenarioStorage, ITestRunStorage
 from overhave.test_execution import OverhaveProjectSettings
-from overhave.transport.http.gitlab_client import GitlabHttpClient, GitlabHttpClientConflictError, GitlabMrRequest
+from overhave.transport.http.gitlab_client import GitlabHttpClient, GitlabMrRequest
 from overhave.transport.http.gitlab_client.models import GitlabMrCreationResponse
 
 logger = logging.getLogger(__name__)
@@ -57,16 +60,18 @@ class GitlabVersionPublisher(GitVersionPublisher):
         logger.info("Prepared merge-request: %s", merge_request.json(by_alias=True))
         try:
             response = self._client.send_merge_request(merge_request)
-            if isinstance(response, GitlabMrCreationResponse):
+            if isinstance(response, ProjectMergeRequest):
+                parsed_response = cast(GitlabMrCreationResponse, response.attributes)
                 self._draft_storage.save_response(
                     draft_id=draft_id,
-                    pr_url=response.get_mr_url,
-                    published_at=response.created_at,
-                    opened=response.state == "opened",
+                    pr_url=parsed_response.web_url,  # type: ignore
+                    published_at=parsed_response.created_at,
+                    opened=parsed_response.state == "opened",
                 )
                 return
-        except GitlabHttpClientConflictError:
-            logger.exception("Gotten conflict. Try to return last merge-request for Draft with id=%s...", draft_id)
-            self._save_as_duplicate(context)
-        except HTTPError:
+        except (GitlabCreateError, GitlabHttpError) as e:
+            if e.response_code == HTTPStatus.CONFLICT:
+                logger.exception("Gotten conflict. Try to return last merge-request for Draft with id=%s...", draft_id)
+                self._save_as_duplicate(context)
+                return
             logger.exception("Got HTTP error while trying to sent merge-request!")
